@@ -121,7 +121,8 @@ impl Cursive {
         self.last_size = size;
         let offset = usize::from(!self.menubar.autohide);
         let size = size.saturating_sub((0, offset));
-        self.root.layout(size);
+        // One pass for the whole tree, so containers can share memoized sizes.
+        crate::view::layout_pass::in_layout_pass(|| self.root.layout(size));
     }
 
     pub(crate) fn draw(&mut self, buffer: &RwLock<crate::buffer::PrintBuffer>) {
