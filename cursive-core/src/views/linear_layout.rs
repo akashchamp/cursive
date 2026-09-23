@@ -37,11 +37,9 @@ pub struct LinearLayout {
     // so remembering only the last one, nested layouts would redo the work
     // of their whole subtree at every level: exponential in depth.
     //
-    // Only exact requests are reused. `SizeCache` also accepts other ones,
-    // but it checks each axis on its own while one axis's answer depends on
-    // the other's request (wrapped text is taller when narrower), and it
-    // assumes a view offered exactly what it answered before would answer
-    // the same, which doesn't hold (after an overflow, typically).
+    // Besides exact requests, sizes are reused for requests that still hold
+    // them, when they didn't use all the space they had (see `Memo::fits`):
+    // enlarging the terminal around content that fits then costs nothing.
     memo: Vec<Memo>,
     // The key `memo` is valid for.
     memo_key: u64,
@@ -61,6 +59,23 @@ struct Memo {
     req: Vec2,
     size: Vec2,
     children: Vec<Vec2>,
+}
+
+impl Memo {
+    // Would `req` give the same result?
+    //
+    // On each axis: for the same request, or for any request that still
+    // holds the size when it was smaller than the request it came from.
+    //
+    // Unlike `SizeCache`, this remembers the original request: a size that
+    // overflowed (larger than its request) says nothing about what a request
+    // of exactly that size would give.
+    fn fits(&self, req: Vec2) -> bool {
+        let axis = |original: usize, size: usize, req: usize| {
+            req == original || (size < original && req >= size)
+        };
+        axis(self.req.x, self.size.x, req.x) && axis(self.req.y, self.size.y, req.y)
+    }
 }
 
 struct Child {
@@ -648,7 +663,8 @@ impl View for LinearLayout {
             // Did anything change since last time?
             self.validate_caches();
 
-            if let Some(memo) = self.memo.iter().find(|memo| memo.req == req) {
+            let memo = self.memo.iter().find(|memo| memo.req == req);
+            if let Some(memo) = memo.or_else(|| self.memo.iter().find(|memo| memo.fits(req))) {
                 // Restore what `layout()` will rely on.
                 for (child, &size) in self.children.iter_mut().zip(&memo.children) {
                     child.required_size = size;
