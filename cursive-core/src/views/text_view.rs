@@ -529,6 +529,12 @@ impl View for TextView {
     fn required_size(&mut self, size: Vec2) -> Vec2 {
         let width = self.wrap_width(size);
         self.update_snapshot();
+        if width == 0 {
+            // No room at all: we'd need at least one column, and at most one
+            // row per byte (each row at width 1 holds at least one).
+            let len = self.snapshot.source().len();
+            return Vec2::new(usize::from(len > 0), len);
+        }
         if let Some(size) = self.known_size(width) {
             return size;
         }
@@ -563,6 +569,19 @@ mod tests {
     use super::TextView;
     use crate::Vec2;
     use crate::view::View;
+
+    #[test]
+    fn zero_width_needs_a_column() {
+        // Not "nothing": parents measuring their minimum size through
+        // decorations reach width 0, and must not think the text is free.
+        let size = TextView::new("abc def").required_size(Vec2::new(0, 5));
+        assert_eq!(size.x, 1);
+        assert!(size.y >= TextView::new("abc def").required_size(Vec2::new(1, 5)).y);
+        assert_eq!(
+            TextView::new("").required_size(Vec2::new(0, 5)),
+            Vec2::zero()
+        );
+    }
 
     #[test]
     fn reused_rows_match_fresh_rows() {
