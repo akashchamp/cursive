@@ -37,10 +37,11 @@ pub struct LinearLayout {
     // so remembering only the last one, nested layouts would redo the work
     // of their whole subtree at every level: exponential in depth.
     //
-    // Only exact requests are reused. Reusing a result for a larger request
-    // when it was smaller than the previous one (like `SizeCache` does) is
-    // not safe here: a compressed child may report less than it was offered
-    // and still grow with more room.
+    // Only exact requests are reused. `SizeCache` also accepts other ones,
+    // but it checks each axis on its own while one axis's answer depends on
+    // the other's request (wrapped text is taller when narrower), and it
+    // assumes a view offered exactly what it answered before would answer
+    // the same, which doesn't hold (after an overflow, typically).
     memo: Vec<Memo>,
     // The key `memo` is valid for.
     memo_key: u64,
