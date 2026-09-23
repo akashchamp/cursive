@@ -103,7 +103,12 @@ where
     GetScroller: FnMut(&mut Model) -> &mut scroll::Core,
     RequiredSize: FnMut(&mut Model, Vec2) -> Vec2,
 {
-    if !needs_relayout && let Some(cached) = get_scroller(model).try_cache(constraint) {
+    // The cache is built by `layout`, in strict mode: it says nothing about
+    // non-strict sizes.
+    if strict
+        && !needs_relayout
+        && let Some(cached) = get_scroller(model).try_cache(constraint)
+    {
         return cached;
     }
 

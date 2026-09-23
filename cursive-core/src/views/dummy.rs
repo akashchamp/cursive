@@ -15,6 +15,10 @@ impl DummyView {
 }
 
 impl View for DummyView {
+    fn layout_key(&self) -> u64 {
+        crate::view::layout_key_seed::<Self>()
+    }
+
     fn draw(&self, _: &Printer) {}
 
     fn needs_relayout(&self) -> bool {

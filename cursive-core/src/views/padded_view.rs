@@ -53,7 +53,10 @@ impl<V: View> ViewWrapper for PaddedView<V> {
     }
 
     fn wrap_layout_key(&self) -> u64 {
-        crate::view::combine_layout_key(self.view.layout_key(), &self.margins)
+        crate::view::combine_layout_key(
+            crate::view::layout_key_seed::<Self>(),
+            &(self.view.layout_key(), self.margins),
+        )
     }
 
     fn wrap_layout(&mut self, size: Vec2) {

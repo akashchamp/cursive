@@ -276,6 +276,11 @@ fn sub_block(extra: usize) -> &'static str {
 }
 
 impl View for ProgressBar {
+    fn layout_key(&self) -> u64 {
+        // Always the same size.
+        crate::view::layout_key_seed::<Self>()
+    }
+
     fn draw(&self, printer: &Printer) {
         // Now, the bar itself...
         let available = printer.size.x;

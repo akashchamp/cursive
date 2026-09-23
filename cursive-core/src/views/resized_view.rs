@@ -210,7 +210,10 @@ impl<T: View> ViewWrapper for ResizedView<T> {
     }
 
     fn wrap_layout_key(&self) -> u64 {
-        crate::view::combine_layout_key(self.view.layout_key(), &(self.size.x, self.size.y))
+        crate::view::combine_layout_key(
+            crate::view::layout_key_seed::<Self>(),
+            &(self.view.layout_key(), self.size),
+        )
     }
 
     fn wrap_layout(&mut self, size: Vec2) {

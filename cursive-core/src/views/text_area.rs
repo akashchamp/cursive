@@ -36,6 +36,9 @@ pub struct TextArea {
     // TODO: use a smarter data structure (rope?)
     content: String,
 
+    // Changes whenever `content` does.
+    version: u64,
+
     /// Byte offsets within `content` representing text rows
     ///
     /// Invariant: never empty.
@@ -79,6 +82,7 @@ impl TextArea {
         #[allow(deprecated)]
         TextArea {
             content: String::new(),
+            version: crate::view::fresh_layout_key(),
             rows: Vec::new(),
             enabled: true,
             scrollbase: ScrollBase::new().right_padding(0),
@@ -128,6 +132,7 @@ impl TextArea {
     /// Sets the content of the view.
     pub fn set_content<S: Into<String>>(&mut self, content: S) {
         self.content = content.into();
+        self.version = crate::view::fresh_layout_key();
 
         // First, make sure we are within the bounds.
         self.cursor = min(self.cursor, self.content.len());
@@ -384,6 +389,7 @@ impl TextArea {
         debug!("Start/end: {}/{}", start, end);
         debug!("Content: `{}`", self.content);
         for _ in self.content.drain(start..end) {}
+        self.version = crate::view::fresh_layout_key();
         debug!("Content: `{}`", self.content);
 
         let selected_row = self.selected_row();
@@ -411,6 +417,7 @@ impl TextArea {
         // First, we inject the data, but keep the cursor unmoved
         // (So the cursor is to the left of the injected char)
         self.content.insert(self.cursor, ch);
+        self.version = crate::view::fresh_layout_key();
 
         // Then, we shift the indexes of every row after this one.
         let shift = ch.len_utf8();
@@ -502,6 +509,10 @@ impl TextArea {
 }
 
 impl View for TextArea {
+    fn layout_key(&self) -> u64 {
+        crate::view::combine_layout_key(crate::view::layout_key_seed::<Self>(), &self.version)
+    }
+
     fn required_size(&mut self, constraint: Vec2) -> Vec2 {
         // Make sure our structure is up to date
         self.soft_compute_rows(constraint);

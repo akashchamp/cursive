@@ -267,6 +267,15 @@ fn show_child(s: &mut Cursive, offset: Vec2, menu: Arc<menu::Tree>) {
 }
 
 impl View for Menubar {
+    fn layout_key(&self) -> u64 {
+        self.root
+            .children
+            .iter()
+            .fold(crate::view::layout_key_seed::<Self>(), |key, item| {
+                crate::view::combine_layout_key(key, &item.label().len())
+            })
+    }
+
     fn draw(&self, printer: &Printer) {
         // Draw the bar at the top
         printer.with_style(PaletteStyle::View, |printer| {

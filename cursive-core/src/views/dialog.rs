@@ -737,6 +737,21 @@ impl Dialog {
 }
 
 impl View for Dialog {
+    fn layout_key(&self) -> u64 {
+        let key = crate::view::combine_layout_key(
+            crate::view::layout_key_seed::<Self>(),
+            &(
+                self.content.layout_key(),
+                self.padding,
+                self.borders,
+                self.title.width(),
+            ),
+        );
+        self.buttons.iter().fold(key, |key, button| {
+            crate::view::combine_layout_key(key, &button.button.layout_key())
+        })
+    }
+
     fn draw(&self, printer: &Printer) {
         // This will be the buttons_height used by the buttons.
         let buttons_height = match self.draw_buttons(printer) {

@@ -517,6 +517,13 @@ fn make_small_stars(length: usize) -> &'static str {
 }
 
 impl View for EditView {
+    fn layout_key(&self) -> u64 {
+        crate::view::combine_layout_key(
+            crate::view::layout_key_seed::<Self>(),
+            &self.content.width(),
+        )
+    }
+
     fn draw(&self, printer: &Printer) {
         assert_eq!(
             printer.size.x, self.last_length,

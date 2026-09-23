@@ -260,6 +260,10 @@ impl RadioButton<String> {
 }
 
 impl<T: 'static + Send + Sync> View for RadioButton<T> {
+    fn layout_key(&self) -> u64 {
+        crate::view::combine_layout_key(crate::view::layout_key_seed::<Self>(), &self.label.width())
+    }
+
     fn required_size(&mut self, _: Vec2) -> Vec2 {
         self.req_size()
     }

@@ -336,6 +336,16 @@ impl MenuPopup {
 }
 
 impl View for MenuPopup {
+    fn layout_key(&self) -> u64 {
+        // The menu itself never changes (it would be a new `Arc`).
+        self.menu
+            .children
+            .iter()
+            .fold(crate::view::layout_key_seed::<Self>(), |key, item| {
+                crate::view::combine_layout_key(key, &Self::item_width(item))
+            })
+    }
+
     fn draw(&self, printer: &Printer) {
         if !printer.size.fits((2, 2)) {
             return;

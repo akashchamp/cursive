@@ -290,6 +290,10 @@ impl Checkbox {
 }
 
 impl View for Checkbox {
+    fn layout_key(&self) -> u64 {
+        crate::view::combine_layout_key(crate::view::layout_key_seed::<Self>(), &self.label.width())
+    }
+
     fn required_size(&mut self, _: Vec2) -> Vec2 {
         if self.label.is_empty() {
             Vec2::new(3, 1)

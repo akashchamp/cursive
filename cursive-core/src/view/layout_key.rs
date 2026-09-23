@@ -15,6 +15,15 @@ pub fn fresh_layout_key() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed) | (1 << 63)
 }
 
+/// Returns a key identifying the type `V`, to start a view's key from.
+///
+/// Views that hash their settings should start from it: two views of
+/// different types can have equal settings but different sizes, and a
+/// parent must notice when one replaces the other.
+pub fn layout_key_seed<V: ?Sized + 'static>() -> u64 {
+    combine_layout_key(0, &std::any::TypeId::of::<V>())
+}
+
 /// Combines a key with any hashable value, typically a view's own settings.
 ///
 /// Order matters: `combine_layout_key(combine_layout_key(k, a), b)` differs

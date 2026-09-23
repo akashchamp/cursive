@@ -231,6 +231,23 @@ impl<T: View> ChildWrapper<T> {
 
 // TODO: use macros to make this less ugly?
 impl<T: View> View for ChildWrapper<T> {
+    fn layout_key(&self) -> u64 {
+        match self {
+            ChildWrapper::Shadow(v) => crate::view::combine_layout_key(
+                crate::view::layout_key_seed::<Self>(),
+                &(0u8, v.layout_key()),
+            ),
+            ChildWrapper::Backfilled(v) => crate::view::combine_layout_key(
+                crate::view::layout_key_seed::<Self>(),
+                &(1u8, v.layout_key()),
+            ),
+            ChildWrapper::Plain(v) => crate::view::combine_layout_key(
+                crate::view::layout_key_seed::<Self>(),
+                &(2u8, v.layout_key()),
+            ),
+        }
+    }
+
     fn draw(&self, printer: &Printer) {
         match *self {
             ChildWrapper::Shadow(ref v) => v.draw(printer),
@@ -735,6 +752,14 @@ where
 }
 
 impl View for StackView {
+    fn layout_key(&self) -> u64 {
+        self.layers
+            .iter()
+            .fold(crate::view::layout_key_seed::<Self>(), |key, layer| {
+                crate::view::combine_layout_key(key, &layer.view.layout_key())
+            })
+    }
+
     fn draw(&self, printer: &Printer) {
         // This function is included for compat with the view trait,
         // it should behave the same as calling them separately, but does

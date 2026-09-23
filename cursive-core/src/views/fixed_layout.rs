@@ -258,6 +258,15 @@ impl FixedLayout {
 }
 
 impl View for FixedLayout {
+    fn layout_key(&self) -> u64 {
+        // Our size only depends on where children are, not on their size.
+        self.children
+            .iter()
+            .fold(crate::view::layout_key_seed::<Self>(), |key, child| {
+                crate::view::combine_layout_key(key, &child.position)
+            })
+    }
+
     fn draw(&self, printer: &Printer) {
         for (i, child) in self.children.iter().enumerate() {
             child

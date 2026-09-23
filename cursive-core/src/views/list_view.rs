@@ -361,6 +361,18 @@ fn try_focus(
 }
 
 impl View for ListView {
+    fn layout_key(&self) -> u64 {
+        self.children.iter().fold(
+            crate::view::layout_key_seed::<Self>(),
+            |key, child| match child {
+                ListChild::Delimiter => crate::view::combine_layout_key(key, &0u8),
+                ListChild::Row(label, view) => {
+                    crate::view::combine_layout_key(key, &(1u8, label.width(), view.layout_key()))
+                }
+            },
+        )
+    }
+
     fn draw(&self, printer: &Printer) {
         if self.children.is_empty() {
             return;

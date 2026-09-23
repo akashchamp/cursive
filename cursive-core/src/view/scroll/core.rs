@@ -100,6 +100,11 @@ pub struct Core {
     /// We keep the cache here so it can be busted when we change the content.
     size_cache: Option<XY<SizeCache<bool>>>,
 
+    /// The request `size_cache` was computed for: it is only valid for that
+    /// one. (`SizeCache::accept` also takes other requests, which isn't safe:
+    /// see `LinearLayout`.)
+    cache_request: Vec2,
+
     /// Defines how to update the offset when the view size changes.
     scroll_strategy: ScrollStrategy,
 }
@@ -122,6 +127,7 @@ impl Core {
             scrollbar_padding: Vec2::new(1, 0),
             thumb_grab: None,
             size_cache: None,
+            cache_request: Vec2::zero(),
             scroll_strategy: ScrollStrategy::KeepRow,
         }
     }
@@ -229,6 +235,7 @@ impl Core {
     /// Rebuild the cache with the given parameters.
     pub(crate) fn build_cache(&mut self, self_size: Vec2, last_size: Vec2, scrolling: XY<bool>) {
         self.size_cache = Some(SizeCache::build_extra(self_size, last_size, scrolling));
+        self.cache_request = last_size;
     }
 
     /// Makes sure the viewport is within the content.
@@ -650,7 +657,7 @@ impl Core {
     /// Returns the cached value if it works, or `None`.
     pub(crate) fn try_cache(&self, constraint: Vec2) -> Option<(Vec2, Vec2, XY<bool>)> {
         self.size_cache.and_then(|cache| {
-            if cache.zip_map(constraint, SizeCache::accept).both() {
+            if constraint == self.cache_request {
                 Some((
                     self.inner_size,
                     cache.map(|c| c.value),

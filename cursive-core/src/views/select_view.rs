@@ -85,6 +85,9 @@ pub struct SelectView<T = String> {
 
     // Cache of required_size. Set to None when it needs to be recomputed.
     last_required_size: Option<Vec2>,
+
+    // Changes whenever `last_required_size` is invalidated.
+    version: u64,
 }
 
 impl<T: 'static + Send + Sync> Default for SelectView<T> {
@@ -112,6 +115,7 @@ impl<T: 'static + Send + Sync> SelectView<T> {
             last_offset: Mutex::new(Vec2::zero()),
             last_size: Vec2::zero(),
             last_required_size: None,
+            version: crate::view::fresh_layout_key(),
         }
     }
 
@@ -170,7 +174,7 @@ impl<T: 'static + Send + Sync> SelectView<T> {
     /// Turns `self` into a popup select view.
     pub fn set_popup(&mut self, popup: bool) {
         self.popup = popup;
-        self.last_required_size = None;
+        self.invalidate();
     }
 
     /// Use custom decorators around the popup button instead of "<" and ">".
@@ -184,6 +188,13 @@ impl<T: 'static + Send + Sync> SelectView<T> {
     /// Use custom decorators around the popup button instead of "<" and ">".
     pub fn set_decorators<S: Into<String>>(&mut self, start: S, end: S) {
         self.decorators = [start.into(), end.into()];
+        self.invalidate();
+    }
+
+    // Forgets our size: something changed it.
+    fn invalidate(&mut self) {
+        self.last_required_size = None;
+        self.version = crate::view::fresh_layout_key();
     }
 
     /// Sets a callback to be used when an item is selected.
@@ -337,7 +348,7 @@ impl<T: 'static + Send + Sync> SelectView<T> {
     pub fn clear(&mut self) {
         self.items.clear();
         self.focus.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.last_required_size = None;
+        self.invalidate();
     }
 
     /// Adds a item to the list, with given label and value.
@@ -354,7 +365,7 @@ impl<T: 'static + Send + Sync> SelectView<T> {
     /// ```
     pub fn add_item<S: Into<StyledString>>(&mut self, label: S, value: T) {
         self.items.push(Item::new(label.into(), value));
-        self.last_required_size = None;
+        self.invalidate();
     }
 
     /// Gets an item at given idx or None.
@@ -374,7 +385,7 @@ impl<T: 'static + Send + Sync> SelectView<T> {
         if i >= self.items.len() {
             None
         } else {
-            self.last_required_size = None;
+            self.invalidate();
             let item = &mut self.items[i];
             if let Some(t) = Arc::get_mut(&mut item.value) {
                 let label = &mut item.label;
@@ -399,7 +410,7 @@ impl<T: 'static + Send + Sync> SelectView<T> {
     where
         T: Clone,
     {
-        self.last_required_size = None;
+        self.invalidate();
         self.items
             .iter_mut()
             .map(|item| (&mut item.label, Arc::make_mut(&mut item.value)))
@@ -415,7 +426,7 @@ impl<T: 'static + Send + Sync> SelectView<T> {
         &mut self,
     ) -> impl iter::DoubleEndedIterator<Item = (&mut StyledString, Option<&mut T>)>
     + iter::ExactSizeIterator {
-        self.last_required_size = None;
+        self.invalidate();
         self.items
             .iter_mut()
             .map(|item| (&mut item.label, Arc::get_mut(&mut item.value)))
@@ -439,7 +450,7 @@ impl<T: 'static + Send + Sync> SelectView<T> {
     /// You should run this callback with a `&mut Cursive`.
     pub fn remove_item(&mut self, id: usize) -> Callback {
         self.items.remove(id);
-        self.last_required_size = None;
+        self.invalidate();
         let focus = self.focus();
         (focus >= id && focus > 0)
             .then(|| {
@@ -462,7 +473,7 @@ impl<T: 'static + Send + Sync> SelectView<T> {
         if focus >= index && !self.items.is_empty() {
             self.set_focus(focus + 1);
         }
-        self.last_required_size = None;
+        self.invalidate();
     }
 
     /// Chainable variant of add_item
@@ -977,6 +988,10 @@ where
 }
 
 impl<T: 'static + Send + Sync> View for SelectView<T> {
+    fn layout_key(&self) -> u64 {
+        crate::view::combine_layout_key(crate::view::layout_key_seed::<Self>(), &self.version)
+    }
+
     fn draw(&self, printer: &Printer) {
         *self.last_offset.lock().unwrap() = printer.offset;
 

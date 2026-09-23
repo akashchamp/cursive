@@ -25,6 +25,11 @@ impl Default for DebugView {
 }
 
 impl View for DebugView {
+    fn layout_key(&self) -> u64 {
+        // Our size depends on the global logs, which change at any time.
+        crate::view::fresh_layout_key()
+    }
+
     fn draw(&self, printer: &Printer) {
         let logs = logger::LOGS.lock().unwrap();
         // Only print the last logs, so skip what doesn't fit

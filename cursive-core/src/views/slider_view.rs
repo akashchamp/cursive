@@ -169,6 +169,13 @@ impl SliderView {
 }
 
 impl View for SliderView {
+    fn layout_key(&self) -> u64 {
+        crate::view::combine_layout_key(
+            crate::view::layout_key_seed::<Self>(),
+            &(self.orientation, self.max_value),
+        )
+    }
+
     fn draw(&self, printer: &Printer) {
         match self.orientation {
             Orientation::Vertical => printer.print_vline((0, 0), self.max_value, "|"),

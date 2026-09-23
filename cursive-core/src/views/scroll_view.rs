@@ -17,6 +17,10 @@ pub struct ScrollView<V> {
 
     core: scroll::Core,
 
+    // The inner view's layout key at our last layout: the scroll cache is
+    // only valid while it doesn't change.
+    inner_key: Option<u64>,
+
     on_scroll: Arc<InnerScrollCallback<V>>,
 }
 
@@ -30,6 +34,7 @@ impl<V> ScrollView<V> {
         ScrollView {
             inner,
             core: scroll::Core::new(),
+            inner_key: None,
             on_scroll: Arc::new(|_, _| EventResult::Ignored),
         }
     }
@@ -344,10 +349,34 @@ impl<V: 'static> ScrollView<V> {
     inner_getters!(self.inner: V);
 }
 
+impl<V: View> ScrollView<V> {
+    // Did the inner view change since our last layout (and cached size)?
+    //
+    // This relies on layout keys rather than `needs_relayout`, which some
+    // views don't report reliably.
+    fn inner_changed(&self) -> bool {
+        self.inner_key != Some(self.inner.layout_key())
+    }
+}
+
 impl<V> View for ScrollView<V>
 where
     V: View,
 {
+    fn layout_key(&self) -> u64 {
+        let enabled = self.core.is_enabled();
+        crate::view::combine_layout_key(
+            crate::view::layout_key_seed::<Self>(),
+            &(
+                self.inner.layout_key(),
+                enabled.x,
+                enabled.y,
+                self.core.get_show_scrollbars(),
+                self.core.get_scrollbar_padding(),
+            ),
+        )
+    }
+
     fn draw(&self, printer: &Printer) {
         scroll::draw(self, printer, |s, p| s.inner.draw(p));
     }
@@ -366,13 +395,15 @@ where
     }
 
     fn layout(&mut self, size: Vec2) {
+        let inner_changed = self.inner_changed();
         scroll::layout(
             self,
             size,
-            self.inner.needs_relayout(),
+            inner_changed,
             |s, si| s.inner.layout(si),
             |s, c| s.inner.required_size(c),
         );
+        self.inner_key = Some(self.inner.layout_key());
     }
 
     fn needs_relayout(&self) -> bool {
@@ -381,7 +412,8 @@ where
 
     fn required_size(&mut self, constraint: Vec2) -> Vec2 {
         // eprintln!("Top constraint: {constraint:?}");
-        scroll::required_size(self, constraint, self.inner.needs_relayout(), |s, c| {
+        let inner_changed = self.inner_changed();
+        scroll::required_size(self, constraint, inner_changed, |s, c| {
             s.inner.required_size(c)
         })
     }

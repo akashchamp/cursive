@@ -133,6 +133,10 @@ impl Button {
 }
 
 impl View for Button {
+    fn layout_key(&self) -> u64 {
+        crate::view::combine_layout_key(crate::view::layout_key_seed::<Self>(), &self.label.width())
+    }
+
     fn draw(&self, printer: &Printer) {
         if printer.size.x == 0 {
             return;

@@ -124,10 +124,13 @@ impl<V: View> ViewWrapper for HideableView<V> {
 
     fn wrap_layout_key(&self) -> u64 {
         if self.visible {
-            crate::view::combine_layout_key(self.view.layout_key(), &true)
+            crate::view::combine_layout_key(
+                crate::view::layout_key_seed::<Self>(),
+                &self.view.layout_key(),
+            )
         } else {
             // Hidden views are always empty, whatever their content.
-            crate::view::combine_layout_key(0, &false)
+            crate::view::layout_key_seed::<Self>()
         }
     }
 }
