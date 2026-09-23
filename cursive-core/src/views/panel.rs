@@ -129,6 +129,7 @@ impl<V: View> ViewWrapper for Panel<V> {
     }
 
     fn wrap_layout(&mut self, size: Vec2) {
+        self.invalidated = false;
         self.view.layout(size.saturating_sub((2, 2)));
     }
 
