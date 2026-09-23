@@ -63,8 +63,8 @@ where
         self
     }
 
-    /// Returns `true` if iteration stopped before the end of the text,
-    /// because the next character is wider than the whole line.
+    /// Returns `true` if some text was left out because it is wider than
+    /// the whole line (a wide character with a width of 1).
     ///
     /// Like a wrapped row, this means a larger width would give different
     /// rows.
@@ -80,6 +80,21 @@ where
     type Item = Row;
 
     fn next(&mut self) -> Option<Row> {
+        // Skip what doesn't fit at all, until we get a row.
+        loop {
+            if let Some(row) = self.next_row()? {
+                return Some(row);
+            }
+        }
+    }
+}
+
+impl<S> LinesIterator<S>
+where
+    S: SpannedText,
+{
+    // Returns the next row, or `Some(None)` if a grapheme had to be skipped.
+    fn next_row(&mut self) -> Option<Option<Row>> {
         // Let's build a beautiful row.
         let allowed_width = if self.show_spaces {
             // Remove 1 from the available space, if possible.
@@ -130,16 +145,22 @@ where
                         }
                     })
                 });
-                chunks = prefix(
-                    &mut graphemes.peekable(),
-                    self.width,
-                    &mut ChunkPart::default(),
-                );
+                let mut graphemes = graphemes.peekable();
+                let first = graphemes
+                    .peek()
+                    .map(|g| (g.width, g.segments[0].end - g.segments[0].start));
+                chunks = prefix(&mut graphemes, self.width, &mut ChunkPart::default());
 
                 if chunks.is_empty() {
                     // Seriously? After everything we did for you?
+                    // Not even one grapheme fits: leave it out, and go on with
+                    // the rest (the next row will start after it).
                     self.truncated = true;
-                    return None;
+                    if let Some((width, length)) = first {
+                        self.chunk_offset.width += width;
+                        self.chunk_offset.length += length;
+                    }
+                    return Some(None);
                 }
 
                 // We are going to return a part of a chunk.
@@ -174,10 +195,10 @@ where
 
         // TODO: merge consecutive segments of the same span
 
-        Some(Row {
+        Some(Some(Row {
             segments,
             width,
             is_wrapped,
-        })
+        }))
     }
 }

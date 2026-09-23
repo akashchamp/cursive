@@ -162,3 +162,22 @@ fn newlines_take_no_room_unless_showing_spaces() {
         [(3, true), (0, false), (3, true), (0, false)]
     );
 }
+
+#[test]
+fn too_wide_characters_are_left_out() {
+    // At width 1, `中` (2 columns) can't be shown: it's left out, but the
+    // rest of the text isn't.
+    let text = StyledString::plain("中a\nb");
+    let mut iter = LinesIterator::new(&text, 1);
+    let rows: Vec<_> = iter
+        .by_ref()
+        .map(|row| {
+            row.resolve(&text)
+                .iter()
+                .map(|span| span.content)
+                .collect::<String>()
+        })
+        .collect();
+    assert_eq!(rows, ["a", "b"]);
+    assert!(iter.is_truncated());
+}
