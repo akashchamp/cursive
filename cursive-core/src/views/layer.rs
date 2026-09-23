@@ -40,7 +40,7 @@ impl<T> Layer<T> {
 }
 
 impl<T: View> ViewWrapper for Layer<T> {
-    wrap_impl!(self.view: T);
+    wrap_impl!(self.view: T; same_size);
 
     fn wrap_draw(&self, printer: &Printer) {
         printer.with_color(self.color, |printer| {

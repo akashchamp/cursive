@@ -120,6 +120,11 @@ where
         self.screen_mut().map(f)
     }
 
+    fn wrap_layout_key(&self) -> u64 {
+        let inner = self.with_view(|v| v.layout_key()).unwrap_or(0);
+        crate::view::combine_layout_key(inner, &self.active_screen)
+    }
+
     fn wrap_call_on_any(&mut self, selector: &Selector, callback: AnyCb) {
         for screen in &mut self.screens {
             screen.call_on_any(selector, callback);

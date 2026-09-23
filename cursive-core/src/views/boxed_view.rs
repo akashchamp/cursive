@@ -57,6 +57,7 @@ impl DerefMut for BoxedView {
 }
 
 impl ViewWrapper for BoxedView {
+    wrap_layout_key_passthrough!();
     type V = dyn View;
 
     fn with_view<F, R>(&self, f: F) -> Option<R>

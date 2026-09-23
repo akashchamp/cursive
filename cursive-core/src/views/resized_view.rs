@@ -209,6 +209,10 @@ impl<T: View> ViewWrapper for ResizedView<T> {
             .zip_map(child_size.zip(req), SizeConstraint::result)
     }
 
+    fn wrap_layout_key(&self) -> u64 {
+        crate::view::combine_layout_key(self.view.layout_key(), &(self.size.x, self.size.y))
+    }
+
     fn wrap_layout(&mut self, size: Vec2) {
         self.invalidated = false;
         let available = self

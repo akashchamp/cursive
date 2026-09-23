@@ -52,6 +52,10 @@ impl<V: View> ViewWrapper for PaddedView<V> {
         self.view.required_size(req.saturating_sub(margins)) + margins
     }
 
+    fn wrap_layout_key(&self) -> u64 {
+        crate::view::combine_layout_key(self.view.layout_key(), &self.margins)
+    }
+
     fn wrap_layout(&mut self, size: Vec2) {
         let margins = self.margins.combined();
         self.view.layout(size.saturating_sub(margins));

@@ -67,6 +67,10 @@ impl<T: View> ViewWrapper for ShadowView<T> {
         self.view.required_size(req.saturating_sub(offset)) + offset
     }
 
+    fn wrap_layout_key(&self) -> u64 {
+        crate::view::combine_layout_key(self.view.layout_key(), &(self.top_padding, self.left_padding))
+    }
+
     fn wrap_layout(&mut self, size: Vec2) {
         let offset = self.padding();
         self.view.layout(size.saturating_sub(offset));

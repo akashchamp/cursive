@@ -116,6 +116,10 @@ impl<V: View> ViewWrapper for Panel<V> {
         }
     }
 
+    fn wrap_layout_key(&self) -> u64 {
+        crate::view::combine_layout_key(self.view.layout_key(), &self.title.width())
+    }
+
     fn wrap_draw(&self, printer: &Printer) {
         printer.print_box((0, 0), printer.size, true);
         self.draw_title(printer);

@@ -93,6 +93,16 @@ pub trait ViewWrapper: Send + Sync + 'static {
         self.with_view(View::needs_relayout).unwrap_or(true)
     }
 
+    /// Wraps the `layout_key` method.
+    ///
+    /// The default implementation relies on `wrap_needs_relayout`, like
+    /// `View::layout_key`: it can't know how this wrapper affects the size.
+    /// Wrappers that don't should return the inner view's key; others should
+    /// combine it with their own settings (see `combine_layout_key`).
+    fn wrap_layout_key(&self) -> u64 {
+        crate::view::layout_key::default_layout_key(self, self.wrap_needs_relayout())
+    }
+
     /// Wraps the `important_area` method.
     fn wrap_important_area(&self, size: Vec2) -> Rect {
         self.with_view(|v| v.important_area(size))
@@ -137,6 +147,21 @@ impl<T: ViewWrapper> View for T {
     fn important_area(&self, size: Vec2) -> Rect {
         self.wrap_important_area(size)
     }
+
+    fn layout_key(&self) -> u64 {
+        self.wrap_layout_key()
+    }
+}
+
+/// Implements `wrap_layout_key` for wrappers that don't affect the size of
+/// their inner view: they share its key.
+macro_rules! wrap_layout_key_passthrough {
+    () => {
+        fn wrap_layout_key(&self) -> u64 {
+            self.with_view(|v| v.layout_key())
+                .unwrap_or_else($crate::view::fresh_layout_key)
+        }
+    };
 }
 
 /// Convenient macro to implement the [`ViewWrapper`] trait.
@@ -165,8 +190,33 @@ impl<T: ViewWrapper> View for T {
 /// }
 /// # fn main() { }
 /// ```
+///
+/// If the wrapper never changes the size of the inner view, add `; same_size`
+/// so containers can reuse the sizes they computed for it
+/// (see [`View::layout_key`]):
+///
+/// ```rust
+/// # use cursive_core::view::{View,ViewWrapper};
+/// struct LoggingView<T: View> {
+///     view: T,
+/// }
+///
+/// impl<T: View> ViewWrapper for LoggingView<T> {
+///     cursive_core::wrap_impl!(self.view: T; same_size);
+/// }
+/// # fn main() { }
+/// ```
+///
+/// [`View::layout_key`]: crate::view::View::layout_key
 #[macro_export]
 macro_rules! wrap_impl {
+    (self.$v:tt: $t:ty; same_size) => {
+        $crate::wrap_impl!(self.$v: $t);
+
+        fn wrap_layout_key(&self) -> u64 {
+            $crate::view::View::layout_key(&self.$v)
+        }
+    };
     (self.$v:tt: $t:ty) => {
         type V = $t;
 

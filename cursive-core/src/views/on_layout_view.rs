@@ -57,7 +57,7 @@ impl<V: 'static> OnLayoutView<V> {
 }
 
 impl<V: View> ViewWrapper for OnLayoutView<V> {
-    wrap_impl!(self.view: V);
+    wrap_impl!(self.view: V; same_size);
 
     fn wrap_layout(&mut self, size: Vec2) {
         (self.on_layout)(&mut self.view, size);

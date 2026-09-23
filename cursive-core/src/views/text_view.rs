@@ -8,8 +8,8 @@ use crate::align::*;
 use crate::style::{Effect, StyleType};
 use crate::utils::lines::spans::{LinesIterator, Row};
 use crate::utils::markup::StyledString;
-use crate::view::{SizeCache, View};
-use crate::{Printer, Vec2, With, XY};
+use crate::view::{View, combine_layout_key, fresh_layout_key};
+use crate::{Printer, Vec2, With};
 
 // Content type used internally for caching and storage
 type InnerContentType = Arc<StyledString>;
@@ -49,8 +49,7 @@ impl TextContent {
         TextContent {
             content: Arc::new(Mutex::new(TextContentInner {
                 content_value: content,
-                content_cache: Arc::new(StyledString::default()),
-                size_cache: None,
+                version: fresh_layout_key(),
             })),
         }
     }
@@ -114,7 +113,7 @@ impl TextContent {
         self.with_content_inner(|c| f(Arc::make_mut(&mut c.content_value)))
     }
 
-    /// Apply the given closure to the inner content, and bust the cache afterward.
+    /// Apply the given closure to the inner content, and bump its version.
     fn with_content_inner<F, O>(&self, f: F) -> O
     where
         F: FnOnce(&mut TextContentInner) -> O,
@@ -123,9 +122,19 @@ impl TextContent {
 
         let out = f(&mut content);
 
-        content.size_cache = None;
+        content.version = fresh_layout_key();
 
         out
+    }
+
+    // The current content and its version.
+    fn snapshot(&self) -> (InnerContentType, u64) {
+        let content = self.content.lock();
+        (Arc::clone(&content.content_value), content.version)
+    }
+
+    fn version(&self) -> u64 {
+        self.content.lock().version
     }
 }
 
@@ -138,13 +147,11 @@ struct TextContentInner {
     // This is what `set_content` changes.
     content_value: InnerContentType,
 
-    // This is what is actually being used to draw.
+    // Changes whenever `content_value` does.
     //
-    // This is cloned (ref-counted) from content_value when computing rows.
-    content_cache: InnerContentType,
-
-    // We keep the cache here so it can be busted when we change the content.
-    size_cache: Option<XY<SizeCache>>,
+    // Several views can share this content: each keeps track of the version
+    // it computed its rows from, rather than relying on a shared cache.
+    version: u64,
 }
 
 impl TextContentInner {
@@ -152,17 +159,6 @@ impl TextContentInner {
     fn get_content(content: &Arc<Mutex<TextContentInner>>) -> TextContentRef {
         let data = Arc::clone(&content.lock().content_value);
         TextContentRef { data }
-    }
-
-    fn is_cache_valid(&self, size: Vec2) -> bool {
-        match self.size_cache {
-            None => false,
-            Some(ref last) => last.x.accept(size.x) && last.y.accept(size.y),
-        }
-    }
-
-    fn get_cache(&self) -> &InnerContentType {
-        &self.content_cache
     }
 }
 
@@ -181,8 +177,19 @@ pub struct TextView {
     // Possibly shared content
     content: TextContent,
 
-    // Pre-computed rows for the content, based on the last view size.
+    // The content `rows` were computed from (the shared content may have
+    // changed since), and its version.
+    snapshot: InnerContentType,
+    snapshot_version: u64,
+
+    // Pre-computed rows for `snapshot`, based on the last view size.
     rows: Vec<Row>,
+
+    // The width `rows` were computed for (`usize::MAX` without wrapping).
+    rows_width: Option<usize>,
+
+    // `snapshot_version` at the last `layout()`.
+    laid_out_version: Option<u64>,
 
     // Text alignment
     align: Align,
@@ -254,7 +261,11 @@ impl TextView {
         TextView {
             content,
             style: StyleType::default(),
+            snapshot: Arc::new(StyledString::default()),
+            snapshot_version: 0,
             rows: Vec::new(),
+            rows_width: None,
+            laid_out_version: None,
             wrap: true,
             align: Align::top_left(),
             width: None,
@@ -306,7 +317,11 @@ impl TextView {
     ///
     /// If `true` (the default), text will wrap long lines when needed.
     pub fn set_content_wrap(&mut self, wrap: bool) {
-        self.wrap = wrap;
+        if wrap != self.wrap {
+            self.wrap = wrap;
+            self.rows_width = None;
+            self.laid_out_version = None;
+        }
     }
 
     /// Sets the horizontal alignment for this view.
@@ -384,31 +399,54 @@ impl TextView {
     // This must be non-destructive, as it may be called
     // multiple times during layout.
     fn compute_rows(&mut self, size: Vec2) {
-        let size = if self.wrap { size } else { Vec2::max_value() };
+        let width = if self.wrap { size.x } else { usize::MAX };
 
-        let mut content = self.content.content.lock();
-        if content.is_cache_valid(size) {
+        let (content, version) = self.content.snapshot();
+        if version != self.snapshot_version {
+            self.snapshot = content;
+            self.snapshot_version = version;
+            self.rows_width = None;
+        }
+
+        if self.rows_fit(width) {
             return;
         }
 
-        // Completely bust the cache
-        // Just in case we fail, we don't want to leave a bad cache.
-        content.size_cache = None;
-        content.content_cache = Arc::clone(&content.content_value);
-
-        if size.x == 0 {
-            // Nothing we can do at this point.
+        self.rows_width = Some(width);
+        if width == 0 {
+            // Nothing fits.
+            self.rows.clear();
+            self.width = None;
             return;
         }
 
-        self.rows = LinesIterator::new(content.get_cache().as_ref(), size.x).collect();
+        let mut lines = LinesIterator::new(self.snapshot.as_ref(), width);
+        self.rows = lines.by_ref().collect();
 
         // Desired width
-        self.width = if self.rows.iter().any(|row| row.is_wrapped) {
-            // If any rows are wrapped, then require the full width.
-            Some(size.x)
+        self.width = if lines.is_truncated() || self.rows.iter().any(|row| row.is_wrapped) {
+            // If any rows are wrapped (or some text didn't even fit), then
+            // require the full width.
+            Some(width)
         } else {
             self.rows.iter().map(|row| row.width).max()
+        }
+    }
+
+    // Are `rows` what `width` would give?
+    fn rows_fit(&self, width: usize) -> bool {
+        match self.rows_width {
+            None => false,
+            Some(w) if w == width => true,
+            // Rows that didn't use all the width they had (so none was
+            // wrapped) are the same for any width that still holds them.
+            //
+            // Not when they used exactly all of it: a trailing space may have
+            // been dropped without the row counting as wrapped.
+            Some(w) => {
+                let used = self.width.unwrap_or(0);
+                used < w && used <= width
+            }
         }
     }
 }
@@ -419,8 +457,6 @@ impl View for TextView {
         // If the content is smaller than the view, align it somewhere.
         let offset = self.align.v.get_offset(h, printer.size.y);
         let printer = &printer.offset((0, offset));
-
-        let content = self.content.content.lock();
 
         printer.with_style(self.style, |printer| {
             for (y, row) in self
@@ -433,7 +469,7 @@ impl View for TextView {
                 let l = row.width;
                 let mut x = self.align.h.get_offset(l, printer.size.x);
 
-                for span in row.resolve_stream(content.get_cache().as_ref()) {
+                for span in row.resolve_stream(self.snapshot.as_ref()) {
                     printer.with_style(*span.attr, |printer| {
                         printer.print((x, y), span.content);
                         x += span.content.width();
@@ -444,8 +480,11 @@ impl View for TextView {
     }
 
     fn needs_relayout(&self) -> bool {
-        let content = self.content.content.lock();
-        content.size_cache.is_none()
+        self.laid_out_version != Some(self.content.version())
+    }
+
+    fn layout_key(&self) -> u64 {
+        combine_layout_key(self.content.version(), &self.wrap)
     }
 
     fn required_size(&mut self, size: Vec2) -> Vec2 {
@@ -457,13 +496,7 @@ impl View for TextView {
     fn layout(&mut self, size: Vec2) {
         // Compute the text rows.
         self.compute_rows(size);
-
-        // The entire "virtual" size (includes all rows)
-        let my_size = Vec2::new(self.width.unwrap_or(0), self.rows.len());
-
-        // Build a fresh cache.
-        let mut content = self.content.content.lock();
-        content.size_cache = Some(SizeCache::build(my_size, size));
+        self.laid_out_version = Some(self.snapshot_version);
     }
 }
 
@@ -479,4 +512,53 @@ enum Blueprint {
     // Full object with optional content field
     // This is also used to add a `with` block
     Object { content: Option<StyledString> },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TextView;
+    use crate::Vec2;
+    use crate::view::View;
+
+    #[test]
+    fn reused_rows_match_fresh_rows() {
+        // A view measured at one width, then another, must answer like a
+        // view measured at the second width directly: reusing rows across
+        // widths must not change anything. Covers trailing spaces (dropped
+        // when they don't fit, without counting as wrapped) and characters
+        // wider than the whole line (left out).
+        let words = [
+            "a",
+            "ab ",
+            " ",
+            "few words",
+            "中",
+            "中文字",
+            "a中",
+            "🦀",
+            "e\u{301}",
+            "\u{200b}",
+            "日本 語",
+            "x\n中",
+            "",
+        ];
+        for a in words {
+            for b in words {
+                for c in words {
+                    let text = format!("{a} {b}{c}");
+                    for w0 in 0..14 {
+                        let mut view = TextView::new(text.clone());
+                        view.required_size(Vec2::new(w0, 10));
+                        for w in 0..14 {
+                            let fresh = TextView::new(text.clone()).required_size(Vec2::new(w, 10));
+                            let reused = view.required_size(Vec2::new(w, 10));
+                            assert_eq!(reused, fresh, "{text:?}: width {w0} then {w}");
+                            // Go back, so the next width is also reached from `w0`.
+                            view.required_size(Vec2::new(w0, 10));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

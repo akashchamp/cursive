@@ -30,6 +30,9 @@ where
     /// If `true`, keep a blank cell at the end of lines
     /// when a whitespace or newline should be.
     show_spaces: bool,
+
+    /// Set when some text couldn't fit at all and was left out.
+    truncated: bool,
 }
 
 impl<S> LinesIterator<S>
@@ -46,6 +49,7 @@ where
             width,
             chunk_offset: ChunkPart::default(),
             show_spaces: false,
+            truncated: false,
         }
     }
 
@@ -57,6 +61,15 @@ where
     pub fn show_spaces(mut self) -> Self {
         self.show_spaces = true;
         self
+    }
+
+    /// Returns `true` if iteration stopped before the end of the text,
+    /// because the next character is wider than the whole line.
+    ///
+    /// Like a wrapped row, this means a larger width would give different
+    /// rows.
+    pub fn is_truncated(&self) -> bool {
+        self.truncated
     }
 }
 
@@ -125,6 +138,7 @@ where
 
                 if chunks.is_empty() {
                     // Seriously? After everything we did for you?
+                    self.truncated = true;
                     return None;
                 }
 

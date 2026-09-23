@@ -62,7 +62,7 @@ impl<T: Send + Sync + 'static> FocusTracker<T> {
 }
 
 impl<T: View> ViewWrapper for FocusTracker<T> {
-    wrap_impl!(self.view: T);
+    wrap_impl!(self.view: T; same_size);
 
     fn wrap_take_focus(&mut self, source: Direction) -> Result<EventResult, CannotFocus> {
         match self.view.take_focus(source) {

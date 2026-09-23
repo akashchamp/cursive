@@ -71,6 +71,7 @@ impl<V> NamedView<V> {
 }
 
 impl<T: View + 'static> ViewWrapper for NamedView<T> {
+    wrap_layout_key_passthrough!();
     type V = T;
 
     fn with_view<F, R>(&self, f: F) -> Option<R>

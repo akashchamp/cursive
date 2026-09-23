@@ -121,6 +121,15 @@ impl<V: View> ViewWrapper for HideableView<V> {
     fn wrap_needs_relayout(&self) -> bool {
         self.invalidated || (self.visible && self.view.needs_relayout())
     }
+
+    fn wrap_layout_key(&self) -> u64 {
+        if self.visible {
+            crate::view::combine_layout_key(self.view.layout_key(), &true)
+        } else {
+            // Hidden views are always empty, whatever their content.
+            crate::view::combine_layout_key(0, &false)
+        }
+    }
 }
 
 #[crate::blueprint(HideableView::new(view))]

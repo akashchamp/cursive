@@ -25,7 +25,7 @@ impl<T> LastSizeView<T> {
 }
 
 impl<T: View> ViewWrapper for LastSizeView<T> {
-    wrap_impl!(self.view: T);
+    wrap_impl!(self.view: T; same_size);
 
     fn wrap_layout(&mut self, size: Vec2) {
         self.size = size;

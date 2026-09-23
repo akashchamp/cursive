@@ -269,7 +269,7 @@ impl<T> OnEventView<T> {
 }
 
 impl<T: View> ViewWrapper for OnEventView<T> {
-    wrap_impl!(self.view: T);
+    wrap_impl!(self.view: T; same_size);
 
     fn wrap_on_event(&mut self, event: Event) -> EventResult {
         // Until we have better closure capture, define captured members separately.

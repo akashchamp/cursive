@@ -26,7 +26,7 @@ impl<T> ThemedView<T> {
 }
 
 impl<T: View> ViewWrapper for ThemedView<T> {
-    wrap_impl!(self.view: T);
+    wrap_impl!(self.view: T; same_size);
 
     fn wrap_draw(&self, printer: &crate::Printer) {
         // Hack: We need to re-apply the View (+Primary) style.

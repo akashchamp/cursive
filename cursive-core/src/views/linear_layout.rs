@@ -1,10 +1,11 @@
 /// Event fired when the view is about to lose focus.
 use crate::{
-    Printer, Vec2, With, XY, direction,
+    Printer, Vec2, With, direction,
     event::{AnyCb, Event, EventResult, Key},
     rect::Rect,
     view::{
-        CannotFocus, IntoBoxedView, Selector, SizeCache, View, ViewNotFound,
+        CannotFocus, IntoBoxedView, Selector, View, ViewNotFound, combine_layout_key,
+        fresh_layout_key,
         layout_pass::{current_pass, in_layout_pass},
     },
 };
@@ -30,23 +31,34 @@ pub struct LinearLayout {
     orientation: direction::Orientation,
     focus: usize,
 
-    cache: Option<XY<SizeCache>>,
-
-    // Every size computed during the current layout pass (see `memo_pass`).
+    // Recently computed sizes, valid while `layout_key()` is `memo_key`.
     //
     // A parent measures each child up to 3 times with different constraints,
-    // so with `cache` alone, nested layouts would redo the work of their
-    // whole subtree at every level: exponential in depth.
+    // so remembering only the last one, nested layouts would redo the work
+    // of their whole subtree at every level: exponential in depth.
+    //
+    // Only exact requests are reused. Reusing a result for a larger request
+    // when it was smaller than the previous one (like `SizeCache` does) is
+    // not safe here: a compressed child may report less than it was offered
+    // and still grow with more room.
     memo: Vec<Memo>,
-    // The layout pass `memo` was filled during.
+    // The key `memo` is valid for.
+    memo_key: u64,
+    // The last layout pass `memo_key` was checked during: nothing can change
+    // during a pass, so it only needs checking once.
     memo_pass: Option<u64>,
+
+    // Changes whenever children are added, removed or accessed mutably.
+    structure: u64,
 }
+
+// How many sizes `memo` remembers.
+const MEMO_CAP: usize = 16;
 
 // The result of a `required_size` computation, with what it left behind.
 struct Memo {
     req: Vec2,
     size: Vec2,
-    cache: Option<XY<SizeCache>>,
     children: Vec<Vec2>,
 }
 
@@ -151,9 +163,10 @@ impl LinearLayout {
             children: Vec::new(),
             orientation,
             focus: 0,
-            cache: None,
             memo: Vec::new(),
+            memo_key: 0,
             memo_pass: None,
+            structure: fresh_layout_key(),
         }
     }
 
@@ -258,8 +271,23 @@ impl LinearLayout {
 
     // Invalidate the view, to request a layout next time
     fn invalidate(&mut self) {
-        self.cache = None;
         self.memo.clear();
+        self.structure = fresh_layout_key();
+    }
+
+    // Drops cached sizes if anything changed since they were computed.
+    fn validate_caches(&mut self) {
+        let pass = current_pass();
+        if pass.is_some() && pass == self.memo_pass {
+            return;
+        }
+        self.memo_pass = pass;
+
+        let key = self.layout_key();
+        if key != self.memo_key {
+            self.memo.clear();
+            self.memo_key = key;
+        }
     }
 
     /// Creates a new vertical layout.
@@ -328,23 +356,6 @@ impl LinearLayout {
             }
         }
         None
-    }
-
-    // If the cache can be used, return the cached size.
-    // Otherwise, return None.
-    fn get_cache(&self, req: Vec2) -> Option<Vec2> {
-        match self.cache {
-            None => None,
-            Some(ref cache) => {
-                // Is our cache even valid?
-                // Also, is any child invalidating the layout?
-                if cache.zip_map(req, SizeCache::accept).both() && self.children_are_sleeping() {
-                    Some(cache.map(|s| s.value))
-                } else {
-                    None
-                }
-            }
-        }
     }
 
     fn children_are_sleeping(&self) -> bool {
@@ -446,10 +457,8 @@ impl LinearLayout {
     }
 
     fn layout_in_pass(&mut self, size: Vec2) {
-        if self.get_cache(size).is_none() {
-            // Build the cache if needed.
-            self.required_size(size);
-        }
+        // Make sure children sizes are the ones for `size`.
+        self.required_size(size);
 
         // We'll use this guy a few times, but it's a mouthful...
         let o = self.orientation;
@@ -479,7 +488,6 @@ impl LinearLayout {
         // Does it fit?
         if ideal.fits_in(req) {
             // Champagne!
-            self.cache = Some(SizeCache::build(ideal, req));
             return ideal;
         }
 
@@ -515,8 +523,6 @@ impl LinearLayout {
 
             // TODO: print some error message or something
             debug!("Seriously? {:?} > {:?}???", desperate, req);
-            // self.cache = Some(SizeCache::build(desperate, req));
-            self.cache = None;
             return desperate;
         }
 
@@ -582,12 +588,7 @@ impl LinearLayout {
         debug!("Final sizes2: {:?}", final_sizes);
 
         // Let's stack everything to see what it looks like.
-        let compromise = self.orientation.stack(final_sizes.iter().copied());
-
-        // Phew, that was a lot of work! I'm not doing it again.
-        self.cache = Some(SizeCache::build(compromise, req));
-
-        compromise
+        self.orientation.stack(final_sizes.iter().copied())
     }
 }
 
@@ -621,7 +622,7 @@ impl View for LinearLayout {
     }
 
     fn needs_relayout(&self) -> bool {
-        if self.cache.is_none() {
+        if self.memo.is_empty() {
             return true;
         }
 
@@ -634,32 +635,33 @@ impl View for LinearLayout {
         in_layout_pass(|| self.layout_in_pass(size));
     }
 
-    fn required_size(&mut self, req: Vec2) -> Vec2 {
-        // Did anything change since last time?
-        if let Some(size) = self.get_cache(req) {
-            return size;
-        }
+    fn layout_key(&self) -> u64 {
+        self.children.iter().fold(
+            combine_layout_key(self.structure, &self.orientation),
+            |key, child| combine_layout_key(key, &child.view.layout_key()),
+        )
+    }
 
+    fn required_size(&mut self, req: Vec2) -> Vec2 {
         in_layout_pass(|| {
-            if self.memo_pass != current_pass() {
-                self.memo.clear();
-                self.memo_pass = current_pass();
-            }
+            // Did anything change since last time?
+            self.validate_caches();
 
             if let Some(memo) = self.memo.iter().find(|memo| memo.req == req) {
                 // Restore what `layout()` will rely on.
                 for (child, &size) in self.children.iter_mut().zip(&memo.children) {
                     child.required_size = size;
                 }
-                self.cache = memo.cache;
                 return memo.size;
             }
 
             let size = self.compute_required_size(req);
+            if self.memo.len() == MEMO_CAP {
+                self.memo.remove(0);
+            }
             self.memo.push(Memo {
                 req,
                 size,
-                cache: self.cache,
                 children: self.children.iter().map(|c| c.required_size).collect(),
             });
             size
@@ -915,5 +917,190 @@ mod tests {
         let expected = make(TextContent::new("abcdef ghijkl mnopqr stuvwx")).required_size(req);
         assert_ne!(before, expected);
         assert_eq!(layout.required_size(req), expected);
+    }
+
+    // ── Cache invalidation ───────────────────────────────────────────────────
+
+    /// Everything the test tree is built from.
+    #[derive(Clone)]
+    struct State {
+        shared: String,
+        rows: Vec<RowState>,
+    }
+
+    #[derive(Clone)]
+    struct RowState {
+        value: String,
+        margins: (usize, usize),
+        hidden: bool,
+        wrap: bool,
+        label_width: usize,
+    }
+
+    fn row_view(i: usize, row: &RowState) -> LinearLayout {
+        use crate::view::{Margins, SizeConstraint};
+        use crate::views::{HideableView, PaddedView, ResizedView};
+
+        let mut value = TextView::new(row.value.clone());
+        value.set_content_wrap(row.wrap);
+        let mut extra = HideableView::new(TextView::new("extra words here"));
+        extra.set_visible(!row.hidden);
+        let mut label = ResizedView::with_full_width(TextView::new(format!("label {i}")));
+        label.set_width(SizeConstraint::Fixed(row.label_width));
+        let (h, v) = row.margins;
+        LinearLayout::horizontal()
+            .child(label.with_name(format!("r{i}")))
+            .child(
+                PaddedView::new(Margins::lrtb(h, h, v, v), value.with_name(format!("v{i}")))
+                    .with_name(format!("p{i}")),
+            )
+            .child(extra.with_name(format!("h{i}")))
+    }
+
+    fn state_tree(state: &State, shared: &TextContent) -> LinearLayout {
+        let mut rows = LinearLayout::vertical();
+        for (i, row) in state.rows.iter().enumerate() {
+            rows.add_child(row_view(i, row));
+        }
+        LinearLayout::horizontal()
+            .child(Panel::new(
+                LinearLayout::vertical()
+                    .child(TextView::new_with_content(shared.clone()))
+                    .child(TextView::new("a sidebar entry")),
+            ))
+            .child(Panel::new(
+                LinearLayout::vertical()
+                    // Same content, shown a second time at another width.
+                    .child(TextView::new_with_content(shared.clone()))
+                    .child(rows.with_name("rows")),
+            ))
+    }
+
+    #[test]
+    fn long_lived_tree_matches_fresh_tree() {
+        for seed in [0x2545_f491_4f6c_dd1d, 7932, 15851, 63365] {
+            check_long_lived_tree(seed, 1000);
+        }
+    }
+
+    fn check_long_lived_tree(seed0: u64, frames: usize) {
+        // Mutate a long-lived tree in every way the test views allow, and
+        // check it always gives the same sizes as a tree built from scratch:
+        // any cache that misses a change shows up as a mismatch.
+        use crate::view::{Finder, Margins, SizeConstraint};
+        use crate::views::{HideableView, NamedView, PaddedView, ResizedView};
+
+        let mut seed = seed0;
+        let mut rnd = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let words = [
+            "a",
+            "few",
+            "words",
+            "that wrap",
+            "somewhat longer text here",
+            "",
+            "中文",
+            "a中",
+            "🦀 ",
+            "trailing ",
+        ];
+        let random_row = |rnd: &mut dyn FnMut(usize) -> usize| RowState {
+            value: (0..rnd(6))
+                .map(|_| words[rnd(words.len())])
+                .collect::<Vec<_>>()
+                .join(" "),
+            margins: (rnd(3), rnd(2)),
+            hidden: rnd(2) == 0,
+            wrap: rnd(4) != 0,
+            label_width: 4 + rnd(8),
+        };
+
+        let mut state = State {
+            shared: "shared content".into(),
+            rows: (0..4).map(|_| random_row(&mut rnd)).collect(),
+        };
+        let shared = TextContent::new(state.shared.clone());
+        let mut tree = state_tree(&state, &shared);
+
+        for frame in 0..frames {
+            for _ in 0..rnd(3) {
+                let n = state.rows.len();
+                let i = rnd(n.max(1));
+                let row = random_row(&mut rnd);
+                match rnd(7) {
+                    0 => {
+                        state.shared = row.value.clone();
+                        shared.set_content(row.value);
+                    }
+                    1 if n > 0 => {
+                        state.rows[i].value = row.value.clone();
+                        tree.call_on_name(&format!("v{i}"), |v: &mut TextView| {
+                            v.set_content(row.value)
+                        });
+                    }
+                    2 if n > 0 => {
+                        state.rows[i].margins = row.margins;
+                        let (h, v) = row.margins;
+                        tree.call_on_name(
+                            &format!("p{i}"),
+                            |p: &mut PaddedView<NamedView<TextView>>| {
+                                p.set_margins(Margins::lrtb(h, h, v, v))
+                            },
+                        );
+                    }
+                    3 if n > 0 => {
+                        state.rows[i].hidden = row.hidden;
+                        tree.call_on_name(&format!("h{i}"), |h: &mut HideableView<TextView>| {
+                            h.set_visible(!row.hidden)
+                        });
+                    }
+                    4 if n > 0 => {
+                        state.rows[i].wrap = row.wrap;
+                        tree.call_on_name(&format!("v{i}"), |v: &mut TextView| {
+                            v.set_content_wrap(row.wrap)
+                        });
+                    }
+                    5 if n > 0 => {
+                        state.rows[i].label_width = row.label_width;
+                        tree.call_on_name(&format!("r{i}"), |r: &mut ResizedView<TextView>| {
+                            r.set_width(SizeConstraint::Fixed(row.label_width))
+                        });
+                    }
+                    6 => {
+                        let add = n < 2 || (n < 8 && rnd(2) == 0);
+                        tree.call_on_name("rows", |rows: &mut LinearLayout| {
+                            if add {
+                                rows.add_child(row_view(n, &row));
+                            } else {
+                                rows.remove_child(n - 1);
+                            }
+                        });
+                        if add {
+                            state.rows.push(row);
+                        } else {
+                            state.rows.pop();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let size = Vec2::new(20 + rnd(80), 5 + rnd(30));
+            if rnd(2) == 0 {
+                tree.layout(size);
+            }
+            let fresh =
+                state_tree(&state, &TextContent::new(state.shared.clone())).required_size(size);
+            assert_eq!(
+                tree.required_size(size),
+                fresh,
+                "seed {seed0}, frame {frame}, size {size:?}"
+            );
+        }
     }
 }

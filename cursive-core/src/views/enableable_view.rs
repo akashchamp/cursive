@@ -50,7 +50,7 @@ impl<V> EnableableView<V> {
 }
 
 impl<V: View> ViewWrapper for EnableableView<V> {
-    wrap_impl!(self.view: V);
+    wrap_impl!(self.view: V; same_size);
 
     fn wrap_on_event(&mut self, event: Event) -> EventResult {
         if self.enabled {

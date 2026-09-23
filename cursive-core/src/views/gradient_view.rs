@@ -106,7 +106,7 @@ impl<T: View, I: Interpolator> crate::view::ViewWrapper for GradientView<T, I>
 where
     I: Send + Sync + 'static,
 {
-    crate::wrap_impl!(self.view: T);
+    crate::wrap_impl!(self.view: T; same_size);
 
     fn wrap_draw(&self, printer: &Printer) {
         self.view.draw(printer);

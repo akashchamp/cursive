@@ -63,6 +63,23 @@ pub trait View: Any + AnyView + Send + Sync {
         true
     }
 
+    /// Returns a key summarizing everything that affects this view's size.
+    ///
+    /// If two calls return the same key, `required_size` must give the same
+    /// answers in between: containers use it to reuse sizes they computed
+    /// before. Views typically combine their own size-related settings with
+    /// their children's keys (see [`combine_layout_key`]), and bump a
+    /// version (see [`fresh_layout_key`]) when their content changes.
+    ///
+    /// The default implementation relies on `needs_relayout`: a new key
+    /// every time while it returns `true`, a stable one otherwise.
+    ///
+    /// [`combine_layout_key`]: crate::view::combine_layout_key
+    /// [`fresh_layout_key`]: crate::view::fresh_layout_key
+    fn layout_key(&self) -> u64 {
+        crate::view::layout_key::default_layout_key(self, self.needs_relayout())
+    }
+
     /// Returns the minimum size the view requires with the given restrictions.
     ///
     /// This is the main way a view communicate its size to its parent.

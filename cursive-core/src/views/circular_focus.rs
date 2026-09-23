@@ -148,7 +148,7 @@ enum WrapKind {
 }
 
 impl<T: View> ViewWrapper for CircularFocus<T> {
-    wrap_impl!(self.view: T);
+    wrap_impl!(self.view: T; same_size);
 
     fn wrap_on_event(&mut self, event: Event) -> EventResult {
         match (self.view.on_event(event.clone()), event) {
