@@ -6,8 +6,8 @@ use crate::{
     rect::Rect,
     style::{PaletteStyle, StyleType},
     utils::lines::simple::{LinesIterator, Row, prefix, simple_prefix},
-    view::{CannotFocus, ScrollBase, SizeCache, View},
-    {Printer, With, XY},
+    view::{CannotFocus, ScrollBase, View},
+    {Printer, With},
 };
 use log::debug;
 use std::cmp::min;
@@ -50,9 +50,21 @@ pub struct TextArea {
     /// Base for scrolling features
     #[allow(deprecated)]
     scrollbase: ScrollBase,
+    /// The size `rows` were computed for.
+    rows_size: Option<Vec2>,
 
-    /// Cache to avoid re-computing layout on no-op events
-    size_cache: Option<XY<SizeCache>>,
+    /// Whether `rows` leave a column for a scrollbar, and if so, how many
+    /// rows the text would take without it (which decides if we need it):
+    /// not counting the ghost row, and whether there would be one.
+    scrollbar: Option<(usize, bool)>,
+
+    /// Whether the last row of `rows` is the "ghost" row for the cursor.
+    ghost_row: bool,
+
+    /// Sizes computed for other requests (for `sizes_version`), so
+    /// `required_size` doesn't have to wrap the text again, nor touch `rows`.
+    sizes: Vec<(Vec2, Vec2)>,
+    sizes_version: u64,
     last_size: Vec2,
 
     /// Byte offset of the currently selected grapheme.
@@ -74,6 +86,26 @@ fn make_rows(text: &str, width: usize) -> Vec<Row> {
     LinesIterator::new(text, width).show_spaces().collect()
 }
 
+// If we are editing the text, we add a fake "space" character for the cursor
+// to indicate where the next character will appear. If the current line is
+// full, adding a character will overflow into the next line. To show that,
+// we need to add a fake "ghost" row, just for the cursor.
+//
+// Returns whether a ghost row was added.
+fn add_ghost_row(rows: &mut Vec<Row>, content_len: usize) -> bool {
+    if rows.last().is_none_or(|row| row.end != content_len) {
+        rows.push(Row {
+            start: content_len,
+            end: content_len,
+            width: 0,
+            is_wrapped: false,
+        });
+        true
+    } else {
+        false
+    }
+}
+
 new_default!(TextArea);
 
 impl TextArea {
@@ -86,7 +118,11 @@ impl TextArea {
             rows: Vec::new(),
             enabled: true,
             scrollbase: ScrollBase::new().right_padding(0),
-            size_cache: None,
+            rows_size: None,
+            scrollbar: None,
+            ghost_row: false,
+            sizes: Vec::new(),
+            sizes_version: 0,
             last_size: Vec2::zero(),
             cursor: 0,
             regular_style: PaletteStyle::EditableText.into(),
@@ -104,7 +140,7 @@ impl TextArea {
 
     /// Ensures next layout call re-computes the rows.
     fn invalidate(&mut self) {
-        self.size_cache = None;
+        self.rows_size = None;
     }
 
     /// Returns the position of the cursor in the content string.
@@ -143,10 +179,7 @@ impl TextArea {
             self.cursor -= 1;
         }
 
-        if let Some(size) = self.size_cache.map(|s| s.map(|s| s.value)) {
-            self.invalidate();
-            self.compute_rows(size);
-        }
+        self.refresh_rows();
     }
 
     /// Sets the content of the view.
@@ -218,22 +251,25 @@ impl TextArea {
         debug!("Offset: {}", byte_offset);
 
         assert!(!self.rows.is_empty());
-        assert!(byte_offset >= self.rows[0].start);
 
+        // Text that can't fit at all (wider than a whole row) is left out
+        // of the rows: an offset there counts as the first row.
         self.rows
             .iter()
             .enumerate()
             .take_while(|&(_, row)| row.start <= byte_offset)
             .map(|(i, _)| i)
             .last()
-            .unwrap()
+            .unwrap_or(0)
     }
 
     fn col_at(&self, byte_offset: usize) -> usize {
         let row_id = self.row_at(byte_offset);
         let row = self.rows[row_id];
         // Number of cells to the left of the cursor
-        self.content[row.start..byte_offset].width()
+        self.content
+            .get(row.start..byte_offset)
+            .map_or(0, UnicodeWidthStr::width)
     }
 
     /// Finds the row containing the cursor
@@ -290,17 +326,11 @@ impl TextArea {
     ///
     /// Wraps the previous line if required.
     fn move_left(&mut self) {
-        let len = {
-            // We don't want to utf8-parse the entire content.
-            // So only consider the last row.
-            let mut row = self.selected_row();
-            if self.rows[row].start == self.cursor {
-                row = row.saturating_sub(1);
-            }
-
-            let text = &self.content[self.rows[row].start..self.cursor];
-            text.graphemes(true).next_back().unwrap().len()
-        };
+        // Looking backward only parses the end of the text.
+        let len = self.content[..self.cursor]
+            .graphemes(true)
+            .next_back()
+            .map_or(0, str::len);
         self.cursor -= len;
     }
 
@@ -316,57 +346,123 @@ impl TextArea {
         self.cursor += len;
     }
 
-    fn is_cache_valid(&self, size: Vec2) -> bool {
-        match self.size_cache {
-            None => false,
-            Some(ref last) => last.x.accept(size.x) && last.y.accept(size.y),
-        }
-    }
+    // The rows for the given size (with a column for the scrollbar if
+    // needed), with the scrollbar and ghost row status.
+    fn rows_for(&self, size: Vec2) -> (Vec<Row>, Option<(usize, bool)>, bool) {
+        let mut rows = make_rows(&self.content, size.x);
+        let ghost_row = add_ghost_row(&mut rows, self.content.len());
 
-    // If we are editing the text, we add a fake "space" character for the
-    // cursor to indicate where the next character will appear.
-    // If the current line is full, adding a character will overflow into the
-    // next line. To show that, we need to add a fake "ghost" row, just for
-    // the cursor.
-    fn fix_ghost_row(&mut self) {
-        if self.rows.is_empty() || self.rows.last().unwrap().end != self.content.len() {
-            // Add a fake, empty row at the end.
-            self.rows.push(Row {
-                start: self.content.len(),
-                end: self.content.len(),
-                width: 0,
-                is_wrapped: false,
-            });
-        }
-    }
-
-    fn soft_compute_rows(&mut self, size: Vec2) {
-        if self.is_cache_valid(size) {
-            debug!("Cache is still valid.");
-            return;
-        }
-        debug!("Computing! Oh yeah!");
-
-        let mut available = size.x;
-
-        self.rows = make_rows(&self.content, available);
-        self.fix_ghost_row();
-
-        if self.rows.len() > size.y {
-            available = available.saturating_sub(1);
+        if rows.len() > size.y {
             // Apparently we'll need a scrollbar. Doh :(
-            self.rows = make_rows(&self.content, available);
-            self.fix_ghost_row();
+            let full_rows = (rows.len() - usize::from(ghost_row), ghost_row);
+            let mut rows = make_rows(&self.content, size.x.saturating_sub(1));
+            let ghost_row = add_ghost_row(&mut rows, self.content.len());
+            return (rows, Some(full_rows), ghost_row);
         }
 
-        if !self.rows.is_empty() {
-            self.size_cache = Some(SizeCache::build(size, size));
-        }
+        (rows, None, ghost_row)
     }
 
     fn compute_rows(&mut self, size: Vec2) {
-        self.soft_compute_rows(size);
+        if self.rows_size != Some(size) {
+            (self.rows, self.scrollbar, self.ghost_row) = self.rows_for(size);
+            self.rows_size = Some(size);
+        }
         self.scrollbase.set_heights(size.y, self.rows.len());
+    }
+
+    // Replaces `range` in the content with `replacement`, and updates rows.
+    //
+    // Rows of a paragraph (up to a line break) only depend on that
+    // paragraph: only the one around the edit is wrapped again, and the
+    // following rows are shifted.
+    fn edit(&mut self, range: std::ops::Range<usize>, replacement: &str) {
+        let Some(size) = self.rows_size else {
+            // No rows yet: we'll compute them on layout.
+            self.content.replace_range(range, replacement);
+            self.version = crate::view::fresh_layout_key();
+            return;
+        };
+
+        // The paragraph around the edit, in the current content.
+        let para_start = self.content[..range.start].rfind('\n').map_or(0, |i| i + 1);
+        let old_para_end = self.content[range.end..]
+            .find('\n')
+            .map_or(self.content.len(), |i| range.end + i + 1);
+        let last_para = old_para_end == self.content.len();
+
+        // How many rows it took without a scrollbar, if we need to know.
+        let old_full_rows = self
+            .scrollbar
+            .map(|_| make_rows(&self.content[para_start..old_para_end], size.x).len());
+
+        let removed = range.len();
+        self.content.replace_range(range, replacement);
+        self.version = crate::view::fresh_layout_key();
+        let para_end = old_para_end + replacement.len() - removed;
+
+        // Replace the paragraph's rows (not counting the ghost row).
+        if self.ghost_row {
+            self.rows.pop();
+        }
+        let first = self.rows.partition_point(|row| row.start < para_start);
+        let last = if last_para {
+            self.rows.len()
+        } else {
+            self.rows.partition_point(|row| row.start < old_para_end)
+        };
+        let width = if self.scrollbar.is_some() {
+            size.x.saturating_sub(1)
+        } else {
+            size.x
+        };
+        let new_rows: Vec<Row> = make_rows(&self.content[para_start..para_end], width)
+            .into_iter()
+            .map(|row| row.shifted(para_start))
+            .collect();
+        let new_count = new_rows.len();
+        self.rows.splice(first..last, new_rows);
+
+        // Following rows just moved.
+        for row in &mut self.rows[first + new_count..] {
+            if replacement.len() >= removed {
+                row.shift(replacement.len() - removed);
+            } else {
+                row.rev_shift(removed - replacement.len());
+            }
+        }
+        self.ghost_row = add_ghost_row(&mut self.rows, self.content.len());
+
+        // Do we still need a scrollbar (or not)? If that changed, all rows
+        // change width.
+        let needs_scrollbar = match (self.scrollbar, old_full_rows) {
+            (Some((full_rows, full_ghost)), Some(old)) => {
+                let new = make_rows(&self.content[para_start..para_end], size.x);
+                let full_rows = full_rows + new.len() - old;
+                // Only the last paragraph decides if there is a ghost row.
+                let full_ghost = if last_para {
+                    new.last()
+                        .is_none_or(|row| para_start + row.end != self.content.len())
+                } else {
+                    full_ghost
+                };
+                self.scrollbar = Some((full_rows, full_ghost));
+                full_rows + usize::from(full_ghost) > size.y
+            }
+            _ => self.rows.len() > size.y,
+        };
+        if needs_scrollbar != self.scrollbar.is_some() {
+            self.invalidate();
+            self.compute_rows(size);
+        } else {
+            self.scrollbase.set_heights(size.y, self.rows.len());
+        }
+    }
+
+    // Computes rows again after the content changed, for our current size.
+    fn refresh_rows(&mut self) {
+        self.invalidate();
+        self.compute_rows(self.last_size);
     }
 
     fn backspace(&mut self) {
@@ -384,127 +480,13 @@ impl TextArea {
             .next()
             .unwrap()
             .len();
-        let start = self.cursor;
-        let end = self.cursor + len;
-        debug!("Start/end: {}/{}", start, end);
-        debug!("Content: `{}`", self.content);
-        for _ in self.content.drain(start..end) {}
-        self.version = crate::view::fresh_layout_key();
-        debug!("Content: `{}`", self.content);
-
-        let selected_row = self.selected_row();
-        debug!("Selected row: {}", selected_row);
-        if self.cursor == self.rows[selected_row].end {
-            // We're removing an (implicit) newline.
-            // This means merging two rows.
-            let new_end = self.rows[selected_row + 1].end;
-            self.rows[selected_row].end = new_end;
-            self.rows.remove(selected_row + 1);
-        }
-        self.rows[selected_row].end -= len;
-
-        // update all the rows downstream
-        for row in &mut self.rows.iter_mut().skip(1 + selected_row) {
-            row.rev_shift(len);
-        }
-        debug!("Rows: {:?}", self.rows);
-
-        self.fix_damages();
-        debug!("Rows: {:?}", self.rows);
+        self.edit(self.cursor..self.cursor + len, "");
     }
 
     fn insert(&mut self, ch: char) {
-        // First, we inject the data, but keep the cursor unmoved
-        // (So the cursor is to the left of the injected char)
-        self.content.insert(self.cursor, ch);
-        self.version = crate::view::fresh_layout_key();
-
-        // Then, we shift the indexes of every row after this one.
-        let shift = ch.len_utf8();
-
-        // The current row grows, every other is just shifted.
-        let selected_row = self.selected_row();
-        self.rows[selected_row].end += shift;
-
-        for row in &mut self.rows.iter_mut().skip(1 + selected_row) {
-            row.shift(shift);
-        }
-        self.cursor += shift;
-
-        // Finally, rows may not have the correct width anymore, so fix them.
-        self.fix_damages();
-    }
-
-    /// Fix a damage located at the cursor.
-    ///
-    /// The only damages are assumed to have occurred around the cursor.
-    ///
-    /// This is an optimization to not re-compute the entire rows when an
-    /// insert happened.
-    fn fix_damages(&mut self) {
-        if self.size_cache.is_none() {
-            // If we don't know our size, we'll get a layout command soon.
-            // So no need to do that here.
-            return;
-        }
-
-        let size = self.size_cache.unwrap().map(|s| s.value);
-
-        // Find affected text.
-        // We know the damage started at this row, so it'll need to go.
-        //
-        // Actually, if possible, also re-compute the previous row.
-        // Indeed, the previous row may have been cut short, and if we now
-        // break apart a big word, maybe the first half can go up one level.
-        let first_row = self.selected_row().saturating_sub(1);
-
-        let first_byte = self.rows[first_row].start;
-
-        // We don't need to go beyond a newline.
-        // If we don't find one, end of the text it is.
-        debug!("Cursor: {}", self.cursor);
-        let last_byte = self.content[self.cursor..]
-            .find('\n')
-            .map(|i| 1 + i + self.cursor);
-        let last_row = last_byte.map_or(self.rows.len(), |last_byte| self.row_at(last_byte));
-        let last_byte = last_byte.unwrap_or(self.content.len());
-
-        debug!("Content: `{}` (len={})", self.content, self.content.len());
-        debug!("start/end: {}/{}", first_byte, last_byte);
-        debug!("start/end rows: {}/{}", first_row, last_row);
-
-        // Do we have access to the entire width?...
-        let mut available = size.x;
-
-        let scrollable = self.rows.len() > size.y;
-        if scrollable {
-            // ... not if a scrollbar is there
-            available = available.saturating_sub(1);
-        }
-
-        // First attempt, if scrollbase status didn't change.
-        debug!("Rows: {:?}", self.rows);
-        let new_rows = make_rows(&self.content[first_byte..last_byte], available);
-        // How much did this add?
-        debug!("New rows: {:?}", new_rows);
-        debug!("{}-{}", first_row, last_row);
-        let new_row_count = self.rows.len() + new_rows.len() + first_row - last_row;
-        if !scrollable && new_row_count > size.y {
-            // We just changed scrollable status.
-            // This changes everything.
-            // TODO: compute_rows() currently makes a scroll-less attempt.
-            // Here, we know it's just no gonna happen.
-            self.invalidate();
-            self.compute_rows(size);
-            return;
-        }
-
-        // Otherwise, replace stuff.
-        let affected_rows = first_row..last_row;
-        let replacement_rows = new_rows.into_iter().map(|row| row.shifted(first_byte));
-        self.rows.splice(affected_rows, replacement_rows);
-        self.fix_ghost_row();
-        self.scrollbase.set_heights(size.y, self.rows.len());
+        let mut buffer = [0; 4];
+        self.edit(self.cursor..self.cursor, ch.encode_utf8(&mut buffer));
+        self.cursor += ch.len_utf8();
     }
 }
 
@@ -514,23 +496,35 @@ impl View for TextArea {
     }
 
     fn required_size(&mut self, constraint: Vec2) -> Vec2 {
-        // Make sure our structure is up to date
-        self.soft_compute_rows(constraint);
+        if self.sizes_version != self.version {
+            self.sizes.clear();
+            self.sizes_version = self.version;
+        }
+        if let Some(&(_, size)) = self.sizes.iter().find(|&&(req, _)| req == constraint) {
+            return size;
+        }
+
+        let (rows, _, _) = self.rows_for(constraint);
 
         // Ideally, we'd want x = the longest row + 1
         // (we always keep a space at the end)
         // And y = number of rows
-        debug!("{:?}", self.rows);
-        let scroll_width = usize::from(self.rows.len() > constraint.y);
+        let scroll_width = usize::from(rows.len() > constraint.y);
 
-        let content_width = if self.rows.iter().any(|row| row.is_wrapped) {
+        let content_width = if rows.iter().any(|row| row.is_wrapped) {
             // If any row has been wrapped, we want to take the full width.
             constraint.x.saturating_sub(1 + scroll_width)
         } else {
-            self.rows.iter().map(|r| r.width).max().unwrap_or(1)
+            rows.iter().map(|r| r.width).max().unwrap_or(1)
         };
 
-        Vec2::new(scroll_width + 1 + content_width, self.rows.len())
+        let size = Vec2::new(scroll_width + 1 + content_width, rows.len());
+        const SIZES_CAP: usize = 8;
+        if self.sizes.len() == SIZES_CAP {
+            self.sizes.remove(0);
+        }
+        self.sizes.push((constraint, size));
+        size
     }
 
     fn draw(&self, printer: &Printer) {
@@ -721,5 +715,56 @@ mod tests {
             area.inactive_style,
             PaletteStyle::EditableTextInactive.into()
         );
+    }
+
+    #[test]
+    fn edits_match_fresh() {
+        // Rows used to be patched incrementally on edits, which could drift
+        // from what the full computation gives (and panic later). Type into
+        // a text area at random, with layouts at random sizes, and compare it
+        // with a fresh one every time.
+        use crate::event::{Event, Key};
+        let mut seed = 99u64;
+        let mut rnd = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let chars = ['a', 'b', ' ', 'x', '中', '\n', 'é'];
+        let keys = [
+            Key::Left,
+            Key::Right,
+            Key::Up,
+            Key::Down,
+            Key::Home,
+            Key::End,
+        ];
+        for _ in 0..200 {
+            let mut area = TextArea::new();
+            let mut size = Vec2::new(1 + rnd(20), 1 + rnd(8));
+            area.layout(size);
+            for _ in 0..60 {
+                let event = match rnd(10) {
+                    0..=4 => Event::Char(chars[rnd(chars.len())]),
+                    5 => Event::Key(Key::Backspace),
+                    6 => Event::Key(Key::Del),
+                    7 => Event::Key(Key::Enter),
+                    8 => Event::Key(keys[rnd(keys.len())]),
+                    _ => {
+                        size = Vec2::new(1 + rnd(20), 1 + rnd(8));
+                        area.layout(size);
+                        continue;
+                    }
+                };
+                area.on_event(event);
+
+                let mut fresh = TextArea::new().content(area.get_content());
+                let req = Vec2::new(1 + rnd(20), 1 + rnd(8));
+                assert_eq!(area.required_size(req), fresh.required_size(req));
+                fresh.layout(size);
+                assert_eq!(area.rows, fresh.rows, "{:?}", area.get_content());
+            }
+        }
     }
 }
