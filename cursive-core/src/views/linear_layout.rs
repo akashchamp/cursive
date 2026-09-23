@@ -529,6 +529,19 @@ impl LinearLayout {
         let orientation = self.orientation;
         if desperate.get(orientation) > req.get(orientation) {
             // Just give up...
+            //
+            // Report what we need to show everything at the minimum: each
+            // child at its minimum length, measured with the real cross
+            // constraint (the minimum sizes were measured with a length of 1,
+            // which says little about their cross size at their minimum).
+            let needed: Vec<Vec2> = self
+                .children
+                .iter_mut()
+                .zip(&min_sizes)
+                .map(|(c, min)| c.required_size(req.with_axis(orientation, *min.get(orientation))))
+                .collect();
+            let desperate = self.orientation.stack(needed.iter().copied());
+
             // TODO: hard-cut
             cap(
                 self.children
