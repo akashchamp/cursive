@@ -59,22 +59,48 @@ struct Memo {
     req: Vec2,
     size: Vec2,
     children: Vec<Vec2>,
+    // For which other requests the result is valid (see `fits`).
+    reuse: Reuse,
+}
+
+// How a size was computed, which tells which other requests would give it.
+#[derive(Clone, Copy)]
+enum Reuse {
+    // Our ideal size fitted: children just got the request.
+    Fitted,
+    // Our ideal size had room on our main axis (not on the other one):
+    // children got their ideal length, whatever the other lengths were, and
+    // none used all the length it was offered, so a longer one wouldn't
+    // change them.
+    MainRoom { ideal: usize },
+    // We had to compress (or give up): the result depends on the whole
+    // request, even where it is smaller (a child may need a scrollbar, so
+    // more width, with less height).
+    Exact,
 }
 
 impl Memo {
     // Would `req` give the same result?
-    //
-    // On each axis: for the same request, or for any request that still
-    // holds the size when it was smaller than the request it came from.
-    //
-    // Unlike `SizeCache`, this remembers the original request: a size that
-    // overflowed (larger than its request) says nothing about what a request
-    // of exactly that size would give.
-    fn fits(&self, req: Vec2) -> bool {
+    fn fits(&self, req: Vec2, orientation: direction::Orientation) -> bool {
+        // For the same request, or for any request that still holds the
+        // size when it was smaller than the request it came from.
+        //
+        // Unlike `SizeCache`, this remembers the original request: a size
+        // that overflowed (larger than its request) says nothing about what
+        // a request of exactly that size would give.
         let axis = |original: usize, size: usize, req: usize| {
             req == original || (size < original && req >= size)
         };
-        axis(self.req.x, self.size.x, req.x) && axis(self.req.y, self.size.y, req.y)
+        match self.reuse {
+            Reuse::Fitted => {
+                axis(self.req.x, self.size.x, req.x) && axis(self.req.y, self.size.y, req.y)
+            }
+            Reuse::MainRoom { ideal } => {
+                req.get(orientation.swap()) == self.req.get(orientation.swap())
+                    && *req.get(orientation) >= ideal
+            }
+            Reuse::Exact => false,
+        }
     }
 }
 
@@ -488,7 +514,9 @@ impl LinearLayout {
     }
 
     // The actual size negotiation, without any caching.
-    fn compute_required_size(&mut self, req: Vec2) -> Vec2 {
+    //
+    // Also returns which other requests the result is valid for.
+    fn compute_required_size(&mut self, req: Vec2) -> (Vec2, Reuse) {
         debug!("Req: {:?}", req);
 
         // First, make a naive scenario: everything will work fine.
@@ -504,7 +532,7 @@ impl LinearLayout {
         // Does it fit?
         if ideal.fits_in(req) {
             // Champagne!
-            return ideal;
+            return (ideal, Reuse::Fitted);
         }
 
         // Ok, so maybe it didn't. Budget cuts, everyone.
@@ -516,17 +544,28 @@ impl LinearLayout {
 
         // See how they like it that way.
         // This is, hopefully, the absolute minimum these views will accept.
+        //
+        // A child never needs more than its ideal size though: squeezed, some
+        // ask for more (a scrollbar appearing), and reserving that would
+        // leave space unused while other children are compressed.
+        let orientation = self.orientation;
         let min_sizes: Vec<Vec2> = self
             .children
             .iter_mut()
-            .map(|c| c.required_size(budget_req))
+            .zip(&ideal_sizes)
+            .map(|(c, ideal)| {
+                let min = c.required_size(budget_req);
+                min.with_axis(
+                    orientation,
+                    *min.get(orientation).min(ideal.get(orientation)),
+                )
+            })
             .collect();
         let desperate = self.orientation.stack(min_sizes.iter().copied());
         debug!("Min sizes: {:?}", min_sizes);
         debug!("Desperate: {:?}", desperate);
 
         // This is the lowest we'll ever go. It better fit at least.
-        let orientation = self.orientation;
         if desperate.get(orientation) > req.get(orientation) {
             // Just give up...
             //
@@ -552,7 +591,7 @@ impl LinearLayout {
 
             // TODO: print some error message or something
             debug!("Seriously? {:?} > {:?}???", desperate, req);
-            return desperate;
+            return (desperate, Reuse::Exact);
         }
 
         // So now that we know we _can_ make it all fit, we can redistribute
@@ -617,7 +656,16 @@ impl LinearLayout {
         debug!("Final sizes2: {:?}", final_sizes);
 
         // Let's stack everything to see what it looks like.
-        self.orientation.stack(final_sizes.iter().copied())
+        // Strictly: a child that used all of its length (the whole request)
+        // might want more with a larger request.
+        let reuse = if ideal.get(orientation) < req.get(orientation) {
+            Reuse::MainRoom {
+                ideal: *ideal.get(orientation),
+            }
+        } else {
+            Reuse::Exact
+        };
+        (self.orientation.stack(final_sizes.iter().copied()), reuse)
     }
 }
 
@@ -677,7 +725,10 @@ impl View for LinearLayout {
             self.validate_caches();
 
             let memo = self.memo.iter().find(|memo| memo.req == req);
-            if let Some(memo) = memo.or_else(|| self.memo.iter().find(|memo| memo.fits(req))) {
+            if let Some(memo) = memo.or_else(|| {
+                let orientation = self.orientation;
+                self.memo.iter().find(|memo| memo.fits(req, orientation))
+            }) {
                 // Restore what `layout()` will rely on.
                 for (child, &size) in self.children.iter_mut().zip(&memo.children) {
                     child.required_size = size;
@@ -685,7 +736,7 @@ impl View for LinearLayout {
                 return memo.size;
             }
 
-            let size = self.compute_required_size(req);
+            let (size, reuse) = self.compute_required_size(req);
             if self.memo.len() == MEMO_CAP {
                 self.memo.remove(0);
             }
@@ -693,6 +744,7 @@ impl View for LinearLayout {
                 req,
                 size,
                 children: self.children.iter().map(|c| c.required_size).collect(),
+                reuse,
             });
             size
         })
@@ -906,7 +958,8 @@ mod tests {
         // Without memoization that is ~4x more leaf calls per level, even
         // though the leaf only ever sees a handful of distinct constraints.
         // (name, wrapper, width each level adds besides the leaf)
-        let wraps: [(&str, fn(LinearLayout) -> Box<dyn View>, usize); 3] = [
+        type Wrap = fn(LinearLayout) -> Box<dyn View>;
+        let wraps: [(&str, Wrap, usize); 3] = [
             ("bare", |l| Box::new(l), 6),
             ("named", |l| Box::new(l.with_name("level")), 6),
             ("panel", |l| Box::new(Panel::new(l)), 8),
