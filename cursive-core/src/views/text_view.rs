@@ -191,6 +191,11 @@ pub struct TextView {
     // `snapshot_version` at the last `layout()`.
     laid_out_version: Option<u64>,
 
+    // Sizes computed for `snapshot` at other widths (`(width, size)`), so
+    // `required_size` can answer without wrapping the text again: parents
+    // often ask for several widths during a single layout.
+    sizes: Vec<(usize, Vec2)>,
+
     // Text alignment
     align: Align,
 
@@ -266,6 +271,7 @@ impl TextView {
             rows: Vec::new(),
             rows_width: None,
             laid_out_version: None,
+            sizes: Vec::new(),
             wrap: true,
             align: Align::top_left(),
             width: None,
@@ -320,6 +326,7 @@ impl TextView {
         if wrap != self.wrap {
             self.wrap = wrap;
             self.rows_width = None;
+            self.sizes.clear();
             self.laid_out_version = None;
         }
     }
@@ -398,15 +405,26 @@ impl TextView {
 
     // This must be non-destructive, as it may be called
     // multiple times during layout.
-    fn compute_rows(&mut self, size: Vec2) {
-        let width = if self.wrap { size.x } else { usize::MAX };
+    // The width text is wrapped at, for the given view size.
+    fn wrap_width(&self, size: Vec2) -> usize {
+        if self.wrap { size.x } else { usize::MAX }
+    }
 
+    // Catches up with the shared content, dropping anything computed for
+    // an older version.
+    fn update_snapshot(&mut self) {
         let (content, version) = self.content.snapshot();
         if version != self.snapshot_version {
             self.snapshot = content;
             self.snapshot_version = version;
             self.rows_width = None;
+            self.sizes.clear();
         }
+    }
+
+    fn compute_rows(&mut self, size: Vec2) {
+        let width = self.wrap_width(size);
+        self.update_snapshot();
 
         if self.rows_fit(width) {
             return;
@@ -430,25 +448,46 @@ impl TextView {
             Some(width)
         } else {
             self.rows.iter().map(|row| row.width).max()
+        };
+
+        const SIZES_CAP: usize = 8;
+        if self.sizes.len() == SIZES_CAP {
+            self.sizes.remove(0);
         }
+        self.sizes.push((width, self.current_size()));
+    }
+
+    fn current_size(&self) -> Vec2 {
+        Vec2::new(self.width.unwrap_or(0), self.rows.len())
+    }
+
+    // The size for `width`, if we can tell without wrapping the text again.
+    fn known_size(&self, width: usize) -> Option<Vec2> {
+        if self.rows_fit(width) {
+            return Some(self.current_size());
+        }
+        self.sizes
+            .iter()
+            .find(|&&(w, size)| fits(w, size.x, width))
+            .map(|&(_, size)| size)
     }
 
     // Are `rows` what `width` would give?
     fn rows_fit(&self, width: usize) -> bool {
-        match self.rows_width {
-            None => false,
-            Some(w) if w == width => true,
-            // Rows that didn't use all the width they had (so none was
-            // wrapped) are the same for any width that still holds them.
-            //
-            // Not when they used exactly all of it: a trailing space may have
-            // been dropped without the row counting as wrapped.
-            Some(w) => {
-                let used = self.width.unwrap_or(0);
-                used < w && used <= width
-            }
-        }
+        self.rows_width
+            .is_some_and(|w| fits(w, self.width.unwrap_or(0), width))
     }
+}
+
+// Is what was computed at width `computed` (using `used` of it) also what
+// `width` would give?
+//
+// For the same width, or when it didn't use all the width it had (so nothing
+// was wrapped) and `width` still holds it. Not when it used exactly all of
+// it: a trailing space may have been dropped without the row counting as
+// wrapped.
+fn fits(computed: usize, used: usize, width: usize) -> bool {
+    computed == width || (used < computed && used <= width)
 }
 
 impl View for TextView {
@@ -488,9 +527,14 @@ impl View for TextView {
     }
 
     fn required_size(&mut self, size: Vec2) -> Vec2 {
-        self.compute_rows(size);
+        let width = self.wrap_width(size);
+        self.update_snapshot();
+        if let Some(size) = self.known_size(width) {
+            return size;
+        }
 
-        Vec2::new(self.width.unwrap_or(0), self.rows.len())
+        self.compute_rows(size);
+        self.current_size()
     }
 
     fn layout(&mut self, size: Vec2) {
