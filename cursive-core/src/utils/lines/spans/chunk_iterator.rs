@@ -115,6 +115,8 @@ where
                         // Before unicode-segmentation 0.1.13, newlines were width=0.
                         // They are now width=1.
                         segments.last_mut().unwrap().width -= last_grapheme.width();
+                        // The line break doesn't take any room in the chunk either.
+                        total_width -= last_grapheme.width();
                     }
                 }
 
@@ -133,7 +135,6 @@ where
 
             if pos != 0 {
                 // If pos != 0, we got an actual segment of a span.
-                total_width += width;
                 let to_remove = if hard_stop {
                     let text = &span_text[self.offset..pos];
                     // Remove the last grapheme.
@@ -144,11 +145,14 @@ where
                 } else {
                     0
                 };
+                // The line break (if any) doesn't take any room.
+                let width = width - span_text[pos - to_remove..pos].width();
+                total_width += width;
                 segments.push(Segment {
                     span_id: self.current_span,
                     start: self.offset,
                     end: pos - to_remove,
-                    width: width - span_text[pos - to_remove..pos].width(),
+                    width,
                 });
             }
 
@@ -180,6 +184,7 @@ where
 
                         // With unicode-width 0.1.13, "\n" now has width 1.
                         segments.last_mut().unwrap().width -= "\n".width();
+                        total_width -= "\n".width();
                     }
 
                     return Some(Chunk {

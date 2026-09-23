@@ -135,3 +135,30 @@ fn test_line_breaks() {
         ]
     );
 }
+
+#[test]
+fn newlines_take_no_room_unless_showing_spaces() {
+    // Rows as (width, is_wrapped).
+    let rows = |text: &str, width: usize, show_spaces: bool| -> Vec<(usize, bool)> {
+        let text = StyledString::plain(text);
+        let iter = LinesIterator::new(&text, width);
+        let iter = if show_spaces {
+            iter.show_spaces()
+        } else {
+            iter
+        };
+        iter.map(|row| (row.width, row.is_wrapped)).collect()
+    };
+
+    // A line break doesn't need a column of its own.
+    assert_eq!(rows("abc\ndef", 3, false), [(3, false), (3, false)]);
+    assert_eq!(rows("a\nb\nc\nd", 1, false), [(1, false); 4]);
+
+    // With `show_spaces` (for a cursor), a cell is kept after each line.
+    assert_eq!(rows("abc\ndef", 4, true), [(3, false), (3, false)]);
+    // When there is no room for it, the cursor gets a row of its own.
+    assert_eq!(
+        rows("abc\ndef", 3, true),
+        [(3, true), (0, false), (3, true), (0, false)]
+    );
+}
