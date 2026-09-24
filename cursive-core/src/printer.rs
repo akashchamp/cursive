@@ -299,16 +299,36 @@ impl<'a, 'b> Printer<'a, 'b> {
         }
     }
 
-    /// Calls a closure on the output window for this printer.
-    pub fn on_window<F, R>(&self, f: F) -> R
+    /// Calls a closure on the output window for this printer, if it fits in the backend.
+    ///
+    /// Returns `None` without calling `f` if the current output window no longer fits
+    /// in the backend buffer -- for instance if the terminal was resized smaller between
+    /// the last layout pass and this draw. This mirrors [`Self::on_window`], but degrades
+    /// gracefully instead of panicking: the caller can simply skip this frame's windowed
+    /// draw and let the next layout pass correct the sizes.
+    pub fn try_on_window<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&mut Window<'_>) -> R,
     {
         let mut buffer = self.buffer.write();
-        let mut window = buffer
-            .window(self.output_window())
-            .expect("printer size exceeds backend size");
-        f(&mut window)
+        let mut window = buffer.window(self.output_window())?;
+        Some(f(&mut window))
+    }
+
+    /// Calls a closure on the output window for this printer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the current output window doesn't fit in the backend buffer, which can
+    /// happen if the terminal is resized between the layout pass and the draw pass. Use
+    /// [`Self::try_on_window`] instead if you'd rather degrade gracefully (skip the draw
+    /// for this frame) than panic in that case.
+    pub fn on_window<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut Window<'_>) -> R,
+    {
+        self.try_on_window(f)
+            .expect("printer size exceeds backend size")
     }
 
     /// Prints a line using the given character.
@@ -753,5 +773,63 @@ impl<'a, 'b> Printer<'a, 'b> {
         self.clone().with(|s| {
             s.size = size.into();
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "printer size exceeds backend size")]
+    fn on_window_panics_when_output_window_exceeds_backend() {
+        // Simulate a terminal shrinking between the layout pass and the draw
+        // pass: the printer was laid out for a 10x10 area, but the backend
+        // buffer has since shrunk to 5x5.
+        let mut backend_buffer = PrintBuffer::new();
+        backend_buffer.resize(Vec2::new(5, 5));
+        let backend_buffer = RwLock::new(backend_buffer);
+        let theme = Theme::default();
+
+        let printer = Printer::new((10, 10), &theme, &backend_buffer);
+
+        printer.on_window(|_window| ());
+    }
+
+    #[test]
+    fn try_on_window_degrades_gracefully_when_output_window_exceeds_backend() {
+        // Same stale-size race as above, but using the non-panicking variant: the
+        // windowed draw should simply be skipped for this frame.
+        let mut backend_buffer = PrintBuffer::new();
+        backend_buffer.resize(Vec2::new(5, 5));
+        let backend_buffer = RwLock::new(backend_buffer);
+        let theme = Theme::default();
+
+        let printer = Printer::new((10, 10), &theme, &backend_buffer);
+
+        let mut called = false;
+        let result = printer.try_on_window(|_window| {
+            called = true;
+        });
+
+        assert_eq!(result, None);
+        assert!(
+            !called,
+            "the closure should not run when the window doesn't fit"
+        );
+    }
+
+    #[test]
+    fn try_on_window_runs_closure_when_output_window_fits_backend() {
+        let mut backend_buffer = PrintBuffer::new();
+        backend_buffer.resize(Vec2::new(10, 10));
+        let backend_buffer = RwLock::new(backend_buffer);
+        let theme = Theme::default();
+
+        let printer = Printer::new((10, 10), &theme, &backend_buffer);
+
+        let result = printer.try_on_window(|window| window.size());
+
+        assert_eq!(result, Some(Vec2::new(10, 10)));
     }
 }
